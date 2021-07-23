@@ -5,14 +5,19 @@ from enums import Enum
 from inspect import isclass
 from itertools import chain
 
-from typing import Literal, Union, TYPE_CHECKING
+from typing import Generic, List, Literal, Union, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Dict, List, Iterable, Tuple, TypeVar, overload
+    from typing import Any, Callable, Dict, Iterable, Tuple, overload
 
     A = TypeVar('A')
     L = TypeVar('L')
+    NT = TypeVar('NT', bound='ConverterT')
     ConverterT = Union['Converter', type, Callable[[None, str], A]]
+
+
+G = TypeVar('G')
+N = TypeVar('N')
 
 
 __all__ = (
@@ -61,6 +66,74 @@ class ConsumeType(Enum):
     list: str         = 'list'
     tuple: str        = 'tuple'
     greedy: str       = 'greedy'
+
+
+class Quotes:
+    """Builtin quote mappings. All attributes are instances of `dict[str, str]`
+
+    Attributes
+    ----------
+    default
+        The default quote mapping.
+            `"` -> `"`
+            `'` -> `'`
+    extended
+        An extended quote mapping that supports
+        quotes from other languages/locales.
+
+            `'"'`      -> `'"'`
+            `'`        -> `'`
+            `'\u2018'` -> `'\u2019'`
+            `'\u201a'` -> `'\u201b'`
+            `'\u201c'` -> `'\u201d'`
+            `'\u201e'` -> `'\u201f'`
+            `'\u2e42'` -> `'\u2e42'`
+            `'\u300c'` -> `'\u300d'`
+            `'\u300e'` -> `'\u300f'`
+            `'\u301d'` -> `'\u301e'`
+            `'\ufe41'` -> `'\ufe42'`
+            `'\ufe43'` -> `'\ufe44'`
+            `'\uff02'` -> `'\uff02'`
+            `'\uff62'` -> `'\uff63'`
+            `'\xab'`   -> `'\xbb'`
+            `'\u2039'` -> `'\u203a'`
+            `'\u300a'` -> `'\u300b'`
+            `'\u3008'` -> `'\u3009'`
+    """
+
+    default = {
+        '"': '"',
+        "'": "'"
+    }
+
+    extended = {
+        '"': '"',
+        "'": "'",
+        "\u2018": "\u2019",
+        "\u201a": "\u201b",
+        "\u201c": "\u201d",
+        "\u201e": "\u201f",
+        "\u2e42": "\u2e42",
+        "\u300c": "\u300d",
+        "\u300e": "\u300f",
+        "\u301d": "\u301e",
+        "\ufe41": "\ufe42",
+        "\ufe43": "\ufe44",
+        "\uff02": "\uff02",
+        "\uff62": "\uff63",
+        "\u2039": "\u203a",
+        "\u300a": "\u300b",
+        "\u3008": "\u3009",
+        "\xab": "\xbb",
+    }
+
+
+class Greedy(Generic[G]):
+    ...
+
+
+class Not(Generic[N]):
+    ...
 
 
 class Converter(ABC):
@@ -112,8 +185,11 @@ class Converter(ABC):
 
 
 class LiteralConverter(Converter):
-    def __init__(self, /, *args: L) -> None:
-        self._valid: Tuple[L, ...] = args
+    def __init__(self, /, *choices: L) -> None:
+        self._valid: Tuple[L, ...] = choices
+
+    def __repr__(self, /) -> None:
+        return f'<{self.__class__.__name__} valid={self._valid!r}>'
 
     async def convert(self, /, ctx: ..., argument: str) -> A:
         errors = []
@@ -133,33 +209,60 @@ class LiteralConverter(Converter):
         raise ConversionError(errors)  # TODO: LiteralConversionError(ConversionError)
 
 
-def _sanitize_converter(converter: ConverterT, /) -> Tuple[Tuple[ConverterT], Optional[bool], Optional[ConsumeType]]:
-    optional = consume = None
+class _Not(Converter):
+    def __init__(self, /, *entities: NT) -> None:
+        self._blacklist: Tuple[NT, ...] = entities
 
+    def __repr__(self, /) -> None:
+        return f'<{self.__class__.__name__} blacklist={self._blacklist!r}>'
+
+    async def convert(self, /, ctx: ..., argument: str) -> A:
+        for entity in self._blacklist:
+            try:
+                await _convert_one(ctx, argument, entity)
+            except ConversionError:
+                return argument
+            else:
+                raise ConversionError('argument is castable into {type}')  # TODO: NotConversionError
+
+
+def _sanitize_converter(
+    converter: ConverterT,
+    /,
+    optional: bool = None,
+    consume: ConsumeType = None
+) -> Tuple[Tuple[ConverterT], Optional[bool], Optional[ConsumeType]]:
     if hasattr(converter, '__origin__') and hasattr(converter, '__args__'):
         origin = converter.__origin__
+        args = converter.__args__
+
         if origin is Union:
-            args = converter.__args__
             if _NoneType in args:
                 # This is an optional type.
                 optional = True
                 return tuple(arg for arg in args if arg is not _NoneType), optional, consume
 
             return tuple(
-                chain.from_iterable(_sanitize_converter(arg) for arg in args)
+                chain.from_iterable(_sanitize_converter(arg)[0] for arg in args)
             ), optional, consume
 
         if origin is Literal:
-            return LiteralConverter(*converter.__args__)
+            converter = LiteralConverter(*args)
 
         if origin is List:
             consume = ConsumeType.list
-            return (_sanitize_converter(converter.__args__[0]),), optional, consume
+            return _sanitize_converter(args[0], optional, consume)
+
+        if origin is Greedy:
+            consume = ConsumeType.greedy
+
+        if origin is Not:
+            converter = _Not(*args)
 
     if isclass(converter) and issubclass(converter, Converter):
         converter = converter()
 
-    return converter, optional, consume
+    return (converter,), optional, consume
 
 
 def _convert_bool(argument: str) -> A:
@@ -210,7 +313,7 @@ class Argument:
             optional: bool = False,
             description: str = None,
             consume_type: Union[ConsumeType, str] = ConsumeType.default,
-            quoted: bool = False,
+            quoted: bool = None,
             quotes: Dict[str, str] = None,
             **kwargs
         ) -> None:
@@ -228,7 +331,7 @@ class Argument:
             optional: bool = False,
             description: str = None,
             consume_type: Union[ConsumeType, str] = ConsumeType.default,
-            quoted: bool = False,
+            quoted: bool = None,
             quotes: Dict[str, str] = None,
             **kwargs
         ) -> None:
@@ -245,7 +348,7 @@ class Argument:
         description: str = None,
         converter: ConverterT = None,
         consume_type: Union[ConsumeType, str] = ConsumeType.default,
-        quoted: bool = False,
+        quoted: bool = None,
         quotes: Dict[str, str] = None,
         **kwargs
     ) -> None:
@@ -254,10 +357,64 @@ class Argument:
         if converters and converter is not None:
             raise ValueError('converter kwarg cannot be used when they are already passed as positional arguments.')
 
-        if converters:
-            actual_converters = converters
-        elif converter:
-            actual_converters = converter,
+        if len(converters) == 1:
+            converter = converters[0]
+            converters = ()
+
+        if converters or converter:
+            if converters:
+                actual_converters, optional_, consume = _sanitize_converter(converters[0])
+                actual_converters += _sanitize_converter(converters[1:])[0]
+            elif converter:
+                actual_converters, optional_, consume = _sanitize_converter(converter)
+            else:
+                return  # to shut up my linter
+
+            optional = optional if optional is not None else optional_
+            consume_type = consume_type if consume_type is not None else consume
+
+        self._param_key: Optional[str] = None
+        self._param_positional: bool = False
+
+        self.name: str = name
+        self.optional: bool = optional
+        self.description: str = description
+        self.default: Any = default
+
+        self.consume_type: ConsumeType = (
+            consume_type if isinstance(consume_type, ConsumeType) else ConsumeType(consume_type)
+        )
+
+        self.quoted: bool = quoted if quoted is not None else consume_type is not ConsumeType.consume_rest
+        self.quotes: Dict[str, str] = quotes if quotes is not None else Quotes.default
+
+        self._signature: str = signature
+        self._converters: Tuple[ConverterT, ...] = actual_converters
+
+        self._kwargs: Dict[str, Any] = kwargs
+
+    def __repr__(self, /) -> str:
+        return f'<Argument name={self.name!r} optional={self.optional} consume_type={self.consume_type}>'
+
+    @property
+    def signature(self, /) -> str:
+        """str: The signature of this argument."""
+
+        if self._signature is not None:
+            return self._signature
+
+        start, end = '<>' if self.optional or self.default is not _NULL else '[]'
+
+        suffix = '...' if self.consume_type in (
+            ConsumeType.list, ConsumeType.tuple, ConsumeType.greedy
+        ) else ''
+
+        default = f'={self.default}' if self.default is not _NULL else ''
+        return start + str(self.name) + default + suffix + end
+
+    @signature.setter
+    def signature(self, value: str, /) -> str:
+        self._signature = value
 
 
 def converter(func: callable) -> Type[Converter]:
