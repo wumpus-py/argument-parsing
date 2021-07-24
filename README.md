@@ -13,7 +13,7 @@ This does not include any implementation of Discord, this is just the bare argum
 
 ## Usage
 ```py
-from parser import Argument, parse
+from argument_parser import Argument, parse
 
 @parse()
 def add(
@@ -28,7 +28,7 @@ add.parse('4 5 this is a comment')
 
 ### Implicit annotations (No use of `Argument`)
 ```py
-from parser import parse
+from argument_parser import parse
 
 @parse()
 def add(
@@ -44,7 +44,7 @@ add.parse('4 5 this is a comment')
 
 ### Argument validation
 ```py
-from parser import Argument
+from argument_parser import Argument
 
 @parse()
 def add(
@@ -59,7 +59,7 @@ def add(
 
 ### Flags
 ```py
-from parser import Argument, Flag, ShorthandFlagAlias as Short
+from argument_parser import Argument, Flag, ShorthandFlagAlias as Short
 
 @parse()
 def add(
@@ -74,7 +74,7 @@ add.parse('5 4 --comment This is a comment')
 
 ### Overloading
 ```py
-from parser import Argument
+from argument_parser import Argument
 
 @parse()
 def add(
