@@ -42,11 +42,24 @@ __all__ = (
 _NoneType: Type[None] = type(None)
 
 
-class _NULL:
-    ...
+class _NullType:
+    def __bool__(self, /) -> bool:
+        return False
+
+    def __repr__(self, /) -> str:
+        return 'NULL'
+
+    __str__ = __repr__
+
+
+_NULL = _NullType()
 
 
 class ConversionError(Exception):
+    ...  # Placeholder
+
+
+class ArgumentParsingError(Exception):
     ...  # Placeholder
 
 
@@ -556,6 +569,7 @@ class _StringReader:
 
                 buffer += char
 
+            self.next_character()
             buffer = buffer[:-1]
             return buffer
         else:
@@ -566,8 +580,9 @@ class _StringReader:
 class _Subparser:
     """A class that parses one specific overload."""
 
-    def __init__(self, arguments: List[Argument] = None, _flags: ... = None, /):
+    def __init__(self, arguments: List[Argument] = None, _flags: ... = None, /, *, callback: ParserCallback = None):
         self._arguments: List[Argument] = arguments or []
+        self.callback: Optional[ParserCallback] = callback
 
     def add_argument(self, argument: Argument, /) -> None:
         self._arguments.append(argument)
@@ -585,7 +600,7 @@ class _Subparser:
         if len(params) < 1:
             raise TypeError('parser function must have at least one parameter (Context)')
 
-        self = cls()
+        self = cls(callback=func)
         for param in params[1:]:
             self.add_argument(Argument._from_parameter(param))
 
@@ -607,9 +622,12 @@ class _Subparser:
 
         i = 0
 
-        for i, argument in enumerate(self._arguments):
+        for i, argument in enumerate(self._arguments, start=1):
             if reader.eof:
+                i -= 1
                 break
+
+            start = reader.index
 
             if argument.consume_type not in (ConsumeType.consume_rest, ConsumeType.default):
                 # Either list, tuple, or greedy
@@ -630,6 +648,7 @@ class _Subparser:
                     result = tuple(result)
 
                 append_value(argument, result)
+                continue
 
             if argument.consume_type is ConsumeType.consume_rest:
                 word = reader.rest.strip()
@@ -639,11 +658,16 @@ class _Subparser:
             try:
                 word = await _convert(ctx, word, argument.converters)
             except ConversionError as exc:
+                if argument.optional:
+                    default = argument.default if argument.default is not _NULL else None
+                    append_value(argument, default)
+                    reader.seek(start)
+                    continue
+
                 raise exc
             else:
                 append_value(argument, word)
 
-        i -= 1
         if i < len(self._arguments):
             for argument in self._arguments[i:]:
                 if argument.default is not _NULL:
@@ -651,7 +675,8 @@ class _Subparser:
                 elif argument.optional:
                     append_value(argument, None)
                 else:
-                    raise  # TODO: MissingArgumentError (or whatever)
+                    raise ArgumentParsingError(f'missing required argument {argument.name!r}')
+                    # TODO: MissingArgumentError (or whatever)
 
         return args, kwargs
 
@@ -687,16 +712,19 @@ class Parser:
         parser = _Subparser.from_function(func)
         return cls(overloads=[parser])
 
-    async def parse(self, text: str, /, ctx: ...) -> Any:
+    async def parse(self, text: str, /, ctx: ...) -> Tuple[ParserCallback, List[Any], Dict[str, Any]]:
         errors = []
-
         for overload in self._overloads:
             try:
-                return await overload.parse(text, ctx=ctx)
-            except ConversionError as exc:
+                return overload.callback, *await overload.parse(text, ctx=ctx)
+            except Exception as exc:
                 errors.append(exc)
 
-        raise ConversionError(errors)
+        raise ArgumentParsingError(errors)  # TODO: ArgumentParsingError
+
+    async def execute(self, /, ctx: ..., content: str) -> None:
+        callback, args, kwargs = await self.parse(content, ctx=ctx)
+        await callback(ctx, *args, **kwargs)
 
 
 def converter(func: callable) -> Type[Converter]:
